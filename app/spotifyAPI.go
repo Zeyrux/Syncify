@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syncify/utils"
 )
 
@@ -30,12 +31,22 @@ type SpotifyAPI struct {
 	headerSearchValue string
 }
 
+type Track struct {
+	Id           string `json:"id"`
+	Name         string `json:"name"`
+	path         string
+	pathImplicit string
+}
+
+type Item struct {
+	Track Track `json:"track"`
+}
+
 type Playlist struct {
 	Id           string `json:"id"`
 	Name         string `json:"name,omitempty"`
+	Items        []Item `json:"items,omitempty"`
 	pathPlaylist string
-	pathSyncFile string
-	noUpdate     bool
 }
 
 // APICredentials
@@ -81,9 +92,10 @@ func (spotifyAPI *SpotifyAPI) Authenticate() {
 	utils.DefaultLog("Spotify API authenticated")
 }
 
-func (spotifyAPI *SpotifyAPI) GetPlaylist(url string) *Playlist {
-	utils.DefaultLog("Getting playlist: " + url)
-	urlSplit := strings.Split(url, "/")
+func (playlist *Playlist) SyncWithSpotify(spotifyAPI *SpotifyAPI) {
+	// Get Playlist Data
+	utils.DefaultLog("Getting playlist: " + playlist.Id)
+	urlSplit := strings.Split(playlist.Id, "/")
 	id := urlSplit[len(urlSplit)-1]
 	requestData, err := http.NewRequest(
 		"GET",
@@ -96,66 +108,110 @@ func (spotifyAPI *SpotifyAPI) GetPlaylist(url string) *Playlist {
 	utils.HandleError(err)
 	responseDataBody, err := io.ReadAll(responseData.Body)
 	utils.HandleError(err)
-	var playlist Playlist
 	json.Unmarshal(responseDataBody, &playlist)
 	utils.DefaultLog("Playlist gotten: " + playlist.Name)
-	return &playlist
+	// Get Playlist Items
+	utils.DefaultLog("Getting playlist items: " + playlist.Name)
+	requestItems, err := http.NewRequest(
+		"GET",
+		"https://api.spotify.com/v1/playlists/"+playlist.Id+"/tracks",
+		nil,
+	)
+	utils.HandleError(err)
+	requestItems.Header.Add(spotifyAPI.headerSearchKey, spotifyAPI.headerSearchValue)
+	responseItems, err := http.DefaultClient.Do(requestItems)
+	utils.HandleError(err)
+	responseItemsBody, err := io.ReadAll(responseItems.Body)
+	utils.HandleError(err)
+	json.Unmarshal(responseItemsBody, &playlist)
+	utils.DefaultLog("Playlist items gotten: " + playlist.Name)
 }
 
 // Playlist
 func (playlist *Playlist) SetPaths(config *Config) {
 	playlist.pathPlaylist = config.RootDir + "\\" + playlist.Name
-	playlist.pathSyncFile = playlist.pathPlaylist + "\\" + ".syncify.spotdl"
+	for i, item := range playlist.Items {
+		playlist.Items[i].Track.path = playlist.pathPlaylist + "\\" + item.Track.Name + ".mp3"
+		playlist.Items[i].Track.pathImplicit = playlist.pathPlaylist + "\\{title}"
+	}
 }
 
-func (playlist *Playlist) Initialize() {
-	utils.DefaultLog("Initializing playlist: " + playlist.Name)
-	err := os.MkdirAll(playlist.pathPlaylist, 0755)
-	utils.HandleError(err)
-	cmd := exec.Command(
-		".venv\\Scripts\\spotdl",
-		"sync",
-		"https://open.spotify.com/playlist/"+playlist.Id,
-		"--save-file",
-		playlist.pathSyncFile,
-		"--output",
-		playlist.pathPlaylist+"\\{title}.mp3",
-	)
-	err = cmd.Run()
-	utils.HandleError(err)
-	playlist.noUpdate = true
-	utils.DefaultLog("Playlist initialized: " + playlist.Name)
-}
+// func (playlist *Playlist) Initialize() {
+// 	utils.DefaultLog("Initializing playlist: " + playlist.Name)
+// 	err := os.MkdirAll(playlist.pathPlaylist, 0755)
+// 	utils.HandleError(err)
+// 	cmd := exec.Command(
+// 		".venv\\Scripts\\spotdl",
+// 		"sync",
+// 		"https://open.spotify.com/playlist/"+playlist.Id,
+// 		"--save-file",
+// 		playlist.pathSyncFile,
+// 		"--output",
+// 		playlist.pathPlaylist+"\\{title}.mp3",
+// 	)
+// 	err = cmd.Run()
+// 	utils.HandleError(err)
+// 	playlist.noUpdate = true
+// 	utils.DefaultLog("Playlist initialized: " + playlist.Name)
+// }
 
 func (playlist *Playlist) Check(config *Config) *Playlist {
 	utils.DefaultLog("Checking playlist: " + playlist.Name)
-	if playlist.Name == "" || strings.HasPrefix(playlist.Id, "http") {
-		playlist = config.spotifyAPI.GetPlaylist(playlist.Id)
-		config.needsSave = true
-	}
+	var trackWaitGroup sync.WaitGroup
+	playlist.SyncWithSpotify(config.spotifyAPI)
 	playlist.SetPaths(config)
 	if _, err := os.Stat(playlist.pathPlaylist); os.IsNotExist(err) {
-		playlist.Initialize()
+		os.MkdirAll(playlist.pathPlaylist, 0755)
 	}
-	if _, err := os.Stat(playlist.pathSyncFile); os.IsNotExist(err) {
-		playlist.Initialize()
+	for _, item := range playlist.Items {
+		item.Track.Check(config, &trackWaitGroup)
 	}
+	trackWaitGroup.Wait()
 	utils.DefaultLog("Playlist checked: " + playlist.Name)
 	return playlist
 }
 
-func (playlist *Playlist) Update(config *Config) {
-	utils.DefaultLog("Updating playlist: " + playlist.Name)
-	if !playlist.noUpdate {
-		cmd := exec.Command(
-			".venv\\Scripts\\spotdl",
-			"sync",
-			playlist.pathSyncFile,
-			"--output",
-			playlist.pathPlaylist+"\\{title}.mp3",
-		)
-		err := cmd.Run()
-		utils.HandleError(err)
+func (track *Track) Check(config *Config, waitGroup *sync.WaitGroup) {
+	if _, err := os.Stat(track.path); os.IsNotExist(err) {
+		waitGroup.Add(1)
+		go Download(track.Id, track.Name, track.pathImplicit, waitGroup)
 	}
-	utils.DefaultLog("Playlist updated: " + playlist.Name)
 }
+
+func Download(trackId string, trackName string, pathTrackImplicit string, waitGroup *sync.WaitGroup) {
+	utils.DefaultLog("Downloading track: " + trackName)
+	cmd := exec.Command(
+		".venv\\Scripts\\spotdl",
+		"download",
+		"https://open.spotify.com/track/"+trackId,
+		"--output",
+		pathTrackImplicit,
+	)
+	err := cmd.Run()
+	if err != nil {
+		utils.DefaultLog("ERROR downloading track: " + trackName)
+	}
+	utils.DefaultLog("Track downloaded: " + trackName)
+	waitGroup.Done()
+}
+
+// func (playlist *Playlist) Update(config *Config) {
+// 	utils.DefaultLog("Updating playlist: " + playlist.Name)
+// 	if !playlist.noUpdate {
+// 		fmt.Println(".venv\\Scripts\\spotdl",
+// 			"sync",
+// 			playlist.pathSyncFile,
+// 			"--output",
+// 			playlist.pathPlaylist+"\\{title}.mp3")
+// 		cmd := exec.Command(
+// 			".venv\\Scripts\\spotdl",
+// 			"sync",
+// 			playlist.pathSyncFile,
+// 			"--output",
+// 			playlist.pathPlaylist+"\\{title}.mp3",
+// 		)
+// 		err := cmd.Run()
+// 		utils.HandleError(err)
+// 	}
+// 	utils.DefaultLog("Playlist updated: " + playlist.Name)
+// }

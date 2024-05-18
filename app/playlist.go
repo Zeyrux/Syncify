@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sync"
 	"syncify/utils"
 )
 
@@ -14,7 +15,6 @@ type Config struct {
 	RootDir    string     `json:"root_dir"`
 	Playlists  []Playlist `json:"playlists"`
 	spotifyAPI *SpotifyAPI
-	needsSave  bool
 }
 
 func NewConfig() *Config {
@@ -29,26 +29,32 @@ func NewConfig() *Config {
 	return &config
 }
 
-func (config Config) Save() {
-	file, err := json.Marshal(config)
+func (config *Config) Save() {
+	configCopy := Config{
+		RootDir:    config.RootDir,
+		Playlists:  config.Playlists,
+		spotifyAPI: config.spotifyAPI,
+	}
+	for i := 0; i < len(configCopy.Playlists); i++ {
+		configCopy.Playlists[i].Items = nil
+	}
+	file, err := json.Marshal(configCopy)
 	utils.HandleError(err)
 	os.WriteFile(configFile, file, 0644)
 }
 
-func (config Config) Check() {
+func (config *Config) Update() {
+	var playlistWaitGroup sync.WaitGroup
 	for i, playlist := range config.Playlists {
-		playlistUpdated := playlist.Check(&config)
-		config.Playlists[i] = *playlistUpdated
+		playlistWaitGroup.Add(1)
+		go config.UpdatePlaylist(i, &playlist, &playlistWaitGroup)
 	}
-	if config.needsSave {
-		config.Save()
-	}
+	playlistWaitGroup.Wait()
 }
 
-func (config Config) Update() {
-	for _, playlist := range config.Playlists {
-		playlist.Update(&config)
-	}
+func (config *Config) UpdatePlaylist(i int, playlist *Playlist, wg *sync.WaitGroup) {
+	config.Playlists[i] = *playlist.Check(config)
+	wg.Done()
 }
 
 func CheckVenv() {
