@@ -157,41 +157,40 @@ func (playlist *Playlist) SetPaths(config *Config) {
 
 func (playlist *Playlist) Check(config *Config) *Playlist {
 	utils.DefaultLog("Checking playlist: " + playlist.Name)
-	var trackWaitGroup sync.WaitGroup
 	playlist.SyncWithSpotify(config.spotifyAPI)
 	playlist.SetPaths(config)
 	if _, err := os.Stat(playlist.pathPlaylist); os.IsNotExist(err) {
 		os.MkdirAll(playlist.pathPlaylist, 0755)
 	}
+	var waitGroup sync.WaitGroup
 	for _, item := range playlist.Items {
-		item.Track.Check(config, &trackWaitGroup)
+		config.currentParallelDownlaods <- struct{}{}
+		waitGroup.Add(1)
+		go item.Track.Check(config, &waitGroup)
 	}
-	trackWaitGroup.Wait()
+	waitGroup.Wait()
 	utils.DefaultLog("Playlist checked: " + playlist.Name)
 	return playlist
 }
 
 func (track *Track) Check(config *Config, waitGroup *sync.WaitGroup) {
 	if _, err := os.Stat(track.path); os.IsNotExist(err) {
-		waitGroup.Add(1)
-		go Download(track.Id, track.Name, track.pathImplicit, waitGroup)
+		utils.DefaultLog("Downloading track: " + track.Name)
+		cmd := exec.Command(
+			".venv\\Scripts\\spotdl",
+			"download",
+			"https://open.spotify.com/track/"+track.Id,
+			"--output",
+			track.pathImplicit,
+		)
+		err := cmd.Run()
+		if err != nil {
+			utils.DefaultLog("ERROR downloading track: " + track.Name)
+		} else {
+			utils.DefaultLog("Track downloaded: " + track.Name)
+		}
 	}
-}
-
-func Download(trackId string, trackName string, pathTrackImplicit string, waitGroup *sync.WaitGroup) {
-	utils.DefaultLog("Downloading track: " + trackName)
-	cmd := exec.Command(
-		".venv\\Scripts\\spotdl",
-		"download",
-		"https://open.spotify.com/track/"+trackId,
-		"--output",
-		pathTrackImplicit,
-	)
-	err := cmd.Run()
-	if err != nil {
-		utils.DefaultLog("ERROR downloading track: " + trackName)
-	}
-	utils.DefaultLog("Track downloaded: " + trackName)
+	<-config.currentParallelDownlaods
 	waitGroup.Done()
 }
 

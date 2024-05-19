@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -12,9 +13,11 @@ import (
 const configFile = "./config.json"
 
 type Config struct {
-	RootDir    string     `json:"root_dir"`
-	Playlists  []Playlist `json:"playlists"`
-	spotifyAPI *SpotifyAPI
+	RootDir                  string     `json:"root_dir"`
+	Playlists                []Playlist `json:"playlists"`
+	ParallelDownloads        int        `json:"parallel_downloads_per_playlist"`
+	spotifyAPI               *SpotifyAPI
+	currentParallelDownlaods chan struct{}
 }
 
 func NewConfig() *Config {
@@ -24,6 +27,7 @@ func NewConfig() *Config {
 	var config Config
 	json.Unmarshal(file, &config)
 	utils.DefaultLog("Config loaded")
+	config.currentParallelDownlaods = make(chan struct{}, config.ParallelDownloads)
 	config.spotifyAPI = NewSpotifyAPI()
 	config.spotifyAPI.Authenticate()
 	return &config
@@ -31,13 +35,15 @@ func NewConfig() *Config {
 
 func (config *Config) Save() {
 	configCopy := Config{
-		RootDir:    config.RootDir,
-		Playlists:  config.Playlists,
-		spotifyAPI: config.spotifyAPI,
+		RootDir:           config.RootDir,
+		Playlists:         config.Playlists,
+		ParallelDownloads: config.ParallelDownloads,
+		spotifyAPI:        config.spotifyAPI,
 	}
 	for i := 0; i < len(configCopy.Playlists); i++ {
 		configCopy.Playlists[i].Items = nil
 	}
+	fmt.Println(configCopy.Playlists)
 	file, err := json.Marshal(configCopy)
 	utils.HandleError(err)
 	os.WriteFile(configFile, file, 0644)
@@ -52,9 +58,9 @@ func (config *Config) Update() {
 	playlistWaitGroup.Wait()
 }
 
-func (config *Config) UpdatePlaylist(i int, playlist *Playlist, wg *sync.WaitGroup) {
+func (config *Config) UpdatePlaylist(i int, playlist *Playlist, waitGroup *sync.WaitGroup) {
 	config.Playlists[i] = *playlist.Check(config)
-	wg.Done()
+	waitGroup.Done()
 }
 
 func CheckVenv() {

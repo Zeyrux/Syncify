@@ -10,4 +10,5 @@ func main() {
 	app.CheckFFMPEG()
 	config := app.NewConfig()
 	config.Update()
+	config.Save()
 }
