@@ -1,21 +1,23 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"sync"
 	"syncify/utils"
+
+	"gopkg.in/yaml.v3"
 )
 
-const configFile = "./config.json"
+// const configFile = "./config.json"
+const configFile = "./config.yaml"
 
 type Config struct {
-	RootDir                  string     `json:"root_dir"`
-	Playlists                []Playlist `json:"playlists"`
-	ParallelDownloads        int        `json:"parallel_downloads_per_playlist"`
+	RootDir                  string     `yaml:"root_dir" json:"root_dir"`
+	Playlists                []Playlist `yaml:"playlists" json:"playlists"`
+	ParallelDownloads        int        `yaml:"parallel_downloads_per_playlist" json:"parallel_downloads_per_playlist"`
 	spotifyAPI               *SpotifyAPI
 	currentParallelDownlaods chan struct{}
 }
@@ -25,7 +27,8 @@ func NewConfig() *Config {
 	file, err := os.ReadFile(configFile)
 	utils.HandleError(err)
 	var config Config
-	json.Unmarshal(file, &config)
+	yaml.Unmarshal(file, &config)
+	fmt.Println(config)
 	utils.DefaultLog("Config loaded")
 	config.currentParallelDownlaods = make(chan struct{}, config.ParallelDownloads)
 	config.spotifyAPI = NewSpotifyAPI()
@@ -34,19 +37,12 @@ func NewConfig() *Config {
 }
 
 func (config *Config) Save() {
-	configCopy := Config{
-		RootDir:           config.RootDir,
-		Playlists:         config.Playlists,
-		ParallelDownloads: config.ParallelDownloads,
-		spotifyAPI:        config.spotifyAPI,
+	playlistIds := make([]string, len(config.Playlists))
+	for i, playlist := range config.Playlists {
+		playlistIds[i] = playlist.Id
 	}
-	for i := 0; i < len(configCopy.Playlists); i++ {
-		configCopy.Playlists[i].Items = nil
-	}
-	fmt.Println(configCopy.Playlists)
-	file, err := json.Marshal(configCopy)
-	utils.HandleError(err)
-	os.WriteFile(configFile, file, 0644)
+	marshaledConfig := utils.MarshalConfigYaml(config.RootDir, config.ParallelDownloads, playlistIds)
+	os.WriteFile(configFile, marshaledConfig, 0644)
 }
 
 func (config *Config) Update() {
